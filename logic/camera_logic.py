@@ -37,6 +37,8 @@ class CameraLogic(GenericLogic):
 
     # declare connectors
     hardware = Connector(interface='CameraInterface')
+    savelogic = Connector(interface='SaveLogic')
+
     _max_fps = ConfigOption('default_exposure', 20)
     _fps = _max_fps
 
@@ -48,6 +50,10 @@ class CameraLogic(GenericLogic):
 
     _exposure = 1.
     _last_image = None
+    _last_image_raw = None
+
+    _subtracted_image = None
+    _divided_image = None
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
@@ -58,6 +64,8 @@ class CameraLogic(GenericLogic):
         """ Initialisation performed during activation of the module.
         """
         self._hardware = self.hardware()
+        self._save_logic = self.savelogic()
+
 
         self.enabled = False
 
@@ -99,11 +107,36 @@ class CameraLogic(GenericLogic):
         self.enabled = False
         self._hardware.stop_acquisition()
 
+    def save(self):
+        """ Save last image to data directory
+        """
+        data = {'image': self._last_image}
+        self._save_logic.save_data(data)
+
+
+    def treat_raw_image(self):
+        """ Take last raw image and update last image with eventual treatment
+
+        This way of doing is dirty, but it's helpful for now.
+        Let's hide this feature from GUI so we're not tempted to use it as is
+        """
+        self._last_image = self._last_image_raw
+        try:
+            if self._subtracted_image is not None:
+                self._last_image = self._last_image - self._subtracted_image
+#            if self._divided_image is not None:
+#                self._last_image = self._last_image / self._subtracted_image
+        except ValueError:
+            self.log.warning('Image dimension for treatment do not match.')
+            self._subtracted_image = None
+            self._divided_image = None
+
 
     def loop(self):
         """ Execute step in the data recording loop: save one of each control and process values
         """
-        self._last_image = self._hardware.get_acquired_data()
+        self._last_image_raw = self._hardware.get_acquired_data()
+        self.treat_raw_image()
         self.sigUpdateDisplay.emit()
         if self.enabled:
             self.timer.start(1000 * 1 / self._fps)
