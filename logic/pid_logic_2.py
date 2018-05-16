@@ -20,12 +20,14 @@ Copyright (c) the Qudi Developers. See the COPYRIGHT.txt file at the
 top-level directory of this distribution and at <https://github.com/Ulm-IQO/qudi/>
 """
 
-import numpy as np
+import copy
+# import numpy as np
 
 from core.module import Connector, ConfigOption, StatusVar
 from core.util.mutex import Mutex
 from logic.generic_logic import GenericLogic
 from qtpy import QtCore
+
 
 
 class PIDLogic(GenericLogic):
@@ -35,303 +37,145 @@ class PIDLogic(GenericLogic):
     _modclass = 'pidlogic'
     _modtype = 'logic'
 
-    ## declare connectors
-    controller = Connector(interface='PIDControllerInterface')
+    hardware = Connector(interface='PIDControllerInterface')
     savelogic = Connector(interface='SaveLogic')
-    _features = ConfigOption('features', ['PID_CONTROLLER'])
-    # can include 'PID_CONTROLLER', 'SETPOINT_CONTROLLER', 'SETPOINT', 'PROCESS_VARIABLE' or 'PROCESS_CONTROL'
-    # depending on what is available
-
-    # status vars
-    bufferLength = StatusVar('bufferlength', 1000)
-    # TODO: Maybe the logic should keep everything (this should not be correlated with the GUI)
+    _data_field = ConfigOption('data_field', tuple('process_value'))
+    _permitted_data_field = ('enabled', 'setpoint', 'process_value', 'control_value', 'kp', 'kd', 'ki')
     
-    _timestep = StatusVar(default=100)
+    _timestep = ConfigOption('timestep', 1.)  # update time in seconds
     _loop_enabled = False
 
     # signals
-    sigUpdateDisplay = QtCore.Signal()
+    sigUpdate = QtCore.Signal()
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
 
-        # number of lines in the matrix plot
-        self.NumberOfSecondsLog = 100  # This breaks logic/GUI compartmentalisation
         self.threadlock = Mutex()
 
     def on_activate(self):
         """ Initialisation performed during activation of the module.
         """
-        self._controller = self.controller()
+        self._hardware = self.hardware()
         self._save_logic = self.savelogic()
 
-        self._has_controller = set(['PID_CONTROLLER', 'SETPOINT_CONTROLLER']).intersection(set(self._features))
-        self._has_setpoint = bool(set(['PID_CONTROLLER', 'SETPOINT_CONTROLLER', 'SETPOINT']).intersection(set(self._features)))
-        self._has_process_value = bool(set(['PID_CONTROLLER', 'SETPOINT_CONTROLLER', 'PROCESS_VARIABLE']).intersection(set(self._features)))
-        self._has_control_value = bool(set(['PID_CONTROLLER', 'PROCESS_VARIABLE']).intersection(set(self._features)))
-        self._has_pid = 'PID_CONTROLLER' in self._features
+        # Check config file
+        for field in self._data_field:
+            if field not in self._permitted_data_field:
+                self.log.error('{} field is not present in any interface'.format(field))
+                return
 
+        self._data = {}
+        for key in self._data_field:
+            self._data[key] = []
 
-        self.history = np.zeros([3, self.bufferLength])
-        self.savingState = False
-
+        self._loop_enabled = True
         self.timer = QtCore.QTimer()
         self.timer.setSingleShot(True)
         self.timer.setInterval(self._timestep)
-        self.timer.timeout.connect(self.loop)
-
-        self.start_loop()
+        self.timer.timeout.connect(self._loop)
+        self.timer.start(self._timestep)
 
     def on_deactivate(self):
         """ Perform required deactivation. """
+        self._loop_enabled = False
         pass
 
-    def getBufferLength(self):  #TODO: This breaks logic/GUI compartmentalisation (and naming conventions)
-        """ Get the current data buffer length.
-        """
-        return self.bufferLength
-
-    def setBufferLength(self, newBufferLength): #TODO: This breaks logic/GUI compartmentalisation (and naming conventions)
-        """ Change buffer length to new value.
-
-            @param int newBufferLength: new buffer length
-        """
-        self.bufferLength = newBufferLength
-        self.history = np.zeros([3, self.bufferLength])
-
-    def start_loop(self):
-        """ Start the data acquisition loop.
-        """
-        self._loop_enabled = True
-        self.timer.start(self._timestep)
-
-    def stop_loop(self):
-        """ Stop the data acquisition loop.
-        """
-        self._loop_enabled = False
-
-    def loop(self):
+    def _loop(self):
         """ Execute step in the data acquisition loop: save one of each control and process values
         """
-        self.history = np.roll(self.history, -1, axis=1)  # TODO : What is the efficiency of "roll storing" method on large array ?
 
-        #TODO: only store activated info, hybrid for now
-        if self._has_process_value:
-            self.history[0, -1] = self._controller.get_process_value()
-        else:
-            self.history[0, -1] = 0
+        if not self._loop_enabled:  # let's stop here
+            return  # prevent trying to read hardware after deactivation
 
-        if self._has_control_value:
-            self.history[1, -1] = self._controller.get_control_value()
-        else:
-            self.history[1, -1] = 0
-
-        if self._has_setpoint:
-            self.history[2, -1] = self._controller.get_setpoint()
-        else:
-            self.history[2, -1] = 0
+        for key in self._data_field:
+            value = getattr( self._hardware, 'get_{}'.format(key))()
+            self._data['key'].append(value)
 
         self.sigUpdateDisplay.emit()
-        if self._loop_enabled:
-            self.timer.start(self._timestep)
+        self.timer.start(self._timestep)
 
-    # TODO: to make the GUI happy for now, this could vary so this need to be redesigned
+    def get_data(self, key, start=0):
+        """ Get an array of data entry for the given key from a start index
+
+        @param str key: key of the requested data
+        @param int start: start point of the array required
+
+        @ return list(any): raw data for given field
+
+        Main function to access data history.
+        The array is deepcopied to prevent modification by user module.
+        As a consequence, real time logging could take lots of resource. That is why it's better
+        to access only the last unread data in by keeping track of entry index.
+        """
+        if key not in self._data_field:
+            self.log.error('Data field {} is not acquired. Please check logic configuration parameters.'.format(key))
+        length = len(self._data[key])
+        if length > 0 and start >= length:
+            self.log.error('Start index is out of the array')
+        else:
+            return copy.deepcopy(self._data[key][start:])
+
     def get_timestep(self):
+        """ Return current timestep between data entries
+
+        """
         return self._timestep
 
-    def get_features(self):
-        return self._features
+    def get_fields(self):
+        """ Return enabled features
 
-    def get_saving_state(self):
-        """ Return whether we are saving data
-
-            @return bool: whether we are saving data right now
         """
-        return self.savingState
+        return self._data_field
 
-    def start_saving(self):
-        """ Start saving data.
+    def save_data(self, path=None, filename=None, extension='.dat', start=0, end=None, step=1):
+        """ Save all acquired data to file
 
-            Function does nothing right now.
-        """
-        pass
+        @param str path: path of where to save data
+        @param str filename: filename to save
+        @param str extension: extension for file
+        @param int start: start index of the entry to save in the file
+        @param int end: stop index of the entry to save in the file
+        @param int step: step index of the entry to save in the file
 
-    def save_sata(self):
-        """ Stop saving data and write data to file.
-
-            Function does nothing right now.
+        If a lot of data is acquired, parameters give a way to reduce disk usage
         """
         pass
 
-    # Beginning of features dependent methods :
+    def set(self, key, value):
+        """ Set a value on the hardware for a given key
 
-    def get_kp(self):
-        """ Return the proportional constant.
+        @param key: key of the value to set
+        @param value: value to set
 
-            @return float: proportional constant of PID controller
+        @return any: the value returned by the hardware function
         """
-        if self._has_pid:
-            return self._controller.get_kp()
-        else:
-            return 0
+        # Check that hardware module has setter function
+        setter = 'set_{}'.format(key)
+        if not hasattr(self._hardware, setter):
+            self.log('Setting {} is not possible, hardware module has no function {}'.format(key, setter))
+            return
+        # If a get_X_limits exist in hardware, let's use it and warning if out of range
+        limits = self.limits(key)
+        if limits:  # True if not None
+            mini, maxi = limits
+            if not mini <= value <= maxi:
+                self.log.warning('{} value {} is out of range [{}, {}]'.format(key, value, mini, maxi))
+        # Now set it
+        return getattr(self._hardware, 'set_'.format(key))(value)
 
-    def set_kp(self, kp):
-        """ Set the proportional constant of the PID controller.
+    def limits(self, key):
+        """ Get the limit tuple from the hardware for a given field
 
-            @prarm float kp: proportional constant of PID controller
+        @param key: key of the field
+
+        @return tuple(any): limit returned by the hardware module
+
+        This function can be used to check if limit are available for a given field
         """
-        if self._has_pid:
-            return self._controller.set_kp(kp)
+        limit_getter = 'get_{}_limits'.format(key)
+        if hasattr(self._hardware, limit_getter):
+            return getattr(self._hardware(limit_getter))
         else:
-            return 0
+            return None
 
-    def get_ki(self):
-        """ Get the integration constant of the PID controller
-
-            @return float: integration constant of the PID controller
-        """
-        if self._has_pid:
-            return self._controller.get_ki()
-        else:
-            return 0
-
-    def set_ki(self, ki):
-        """ Set the integration constant of the PID controller.
-
-            @param float ki: integration constant of the PID controller
-        """
-        if self._has_pid:
-            return self._controller.set_ki(ki)
-        else:
-            return 0
-
-    def get_kd(self):
-        """ Get the derivative constant of the PID controller
-
-            @return float: the derivative constant of the PID controller
-        """
-        if self._has_pid:
-            return self._controller.get_kd()
-        else:
-            return 0
-
-    def set_kd(self, kd):
-        """ Set the derivative constant of the PID controller
-
-            @param float kd: the derivative constant of the PID controller
-        """
-        if self._has_pid:
-            return self._controller.set_kd(kd)
-        else:
-            return 0
-
-    def get_setpoint(self):
-        """ Get the current setpoint of the controller.
-
-            @return float: current set point of the controller
-        """
-        if self._has_setpoint:
-            return self.history[2, -1]
-        else:
-            return 0
-
-    def set_setpoint(self, setpoint):
-        """ Set the current setpoint of the PID controller.
-
-            @param float setpoint: new set point of the controller
-        """
-        if self._has_setpoint:
-            return self._controller.set_setpoint(setpoint)
-        else:
-            return 0
-
-    def get_enabled(self):
-        """ See if the PID controller is controlling a process.
-
-            @return bool: whether the PID controller is preparing to or conreolling a process
-        """
-        if self._has_controller:
-            return self._controller.get_enabled()
-        else:
-            return 0
-
-    def set_enabled(self, enabled):
-        """ Set the state of the PID controller.
-
-            @param bool enabled: desired state of PID controller
-        """
-        if self._has_controller:
-            return self._controller.set_enabled(enabled)
-        else:
-            return 0
-
-    def get_control_limits(self):
-        """ Get the minimum and maximum value of the control actuator.
-
-            @return list(float): (minimum, maximum) values of the control actuator
-        """
-        if self._has_control_value:
-            return self._controller.get_control_limits()
-        else:
-            return 0
-
-    def set_control_limits(self, limits):  # TODO: Should this be ok ?
-        """ Set the minimum and maximum value of the control actuator.
-
-            @param list(float) limits: (minimum, maximum) values of the control actuator
-
-            This function does nothing, control limits are handled by the control module
-        """
-        if self._has_pid:
-            return self._controller.set_control_limits(limits)
-        else:
-            return 0
-
-    def get_pv(self): # TODO : change name ??? It's confusion with PID variables
-        """ Get current process input value.
-
-            @return float: current process input value
-        """
-        if self._has_process_value:
-            return self.history[0, -1]
-        else:
-            return 0
-
-    def get_cv(self):
-        """ Get current control output value.
-
-            @return float: control output value
-        """
-        if self._has_process_value:
-            return self.history[1, -1]
-        else:
-            return 0
-
-    # TODO : What is that exactly ?
-    def get_extra(self):
-        if self._has_pid:
-            return self._controller.get_extra()
-        else:
-            return []
-
-    # TODO: How does manual fit into all this ?
-    def get_manual_value(self):
-        """ Return the control value for manual mode.
-
-            @return float: control value for manual mode
-        """
-
-        if self._has_pid:
-            return self._controller.get_manual_value()
-        else:
-            return 0
-
-    def set_manual_value(self, manualvalue):
-        """ Set the control value for manual mode.
-
-            @param float manualvalue: control value for manual mode of controller
-        """
-        if self._has_pid:
-            return self._controller.set_manual_value(manualvalue)
-        else:
-            return 0
