@@ -29,10 +29,16 @@ from logic.generic_logic import GenericLogic
 from qtpy import QtCore
 
 
-
 class PIDLogic(GenericLogic):
-    """
-    Control a process via software PID.
+    """ Monitor or control a process
+
+    This module takes data_field list as input and tries to log every entry.
+    To get or set properties, this module tries to call the get_<field> and set_<field> function of the hardware.
+
+    To access data from the GUI, only one function is needed get_data by specifying a field.
+
+    Data can be any type, eventually tuple for multiple sensors value
+
     """
     _modclass = 'pidlogic'
     _modtype = 'logic'
@@ -89,7 +95,7 @@ class PIDLogic(GenericLogic):
             return  # prevent trying to read hardware after deactivation
 
         for key in self._data_field:
-            value = getattr( self._hardware, 'get_{}'.format(key))()
+            value = getattr(self._hardware, 'get_{}'.format(key))()
             self._data['key'].append(value)
 
         self.sigUpdateDisplay.emit()
