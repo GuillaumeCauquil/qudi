@@ -44,7 +44,7 @@ class Camera():
     found in the Andor SDK Users Guide
     """
 
-    def __init__(self):
+    def __init__(self, path="C:\\Program Files\\Andor SOLIS\\"):
         '''
         Loads and initializes the hardware driver.
         Initializes local parameters
@@ -54,8 +54,8 @@ class Camera():
         # for Windows
         if platform.system() == "Windows":
             if platform.architecture()[0] == "64bit":
-                self._init_path = "C:\\Program Files\\Andor SOLIS\\"
-                self._dll = cdll.LoadLibrary("C:\\Program Files\\Andor SOLIS\\atmcd64d_legacy")
+                self._init_path = path
+                self._dll = cdll.LoadLibrary("{}atmcd64d_legacy".format(path))
             else:
                 raise RuntimeError("Only 64bit Version is supported")
         # for Linux

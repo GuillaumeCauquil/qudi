@@ -57,6 +57,7 @@ class ScectrometerCameraAndor(Base, CameraInterface, SetpointControllerInterface
     _default_read_mode = ConfigOption('default_read_mode', ReadMode.FVB)
     _default_temperature = ConfigOption('default_temperature', -70)
     _default_cooler_on = ConfigOption('default_cooler_on', True)
+    _path = ConfigOption('path', None)
 
     _exposure = _default_exposure
     _temperature = _default_temperature
@@ -75,7 +76,10 @@ class ScectrometerCameraAndor(Base, CameraInterface, SetpointControllerInterface
         """ Initialisation performed during activation of the module.
          """
 
-        self.cam = Camera()
+        if self._path:
+            self.cam = Camera(self._path)
+        else:
+            self.cam = Camera()
         self.cam.SetVerbose(False)
         self.set_read_mode(self._read_mode)
         self.cam.SetAcquisitionMode(1)  # single
